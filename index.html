@@ -92,7 +92,7 @@ textarea.f{min-height:120px}
 <div id="toast" class="toast"></div>
 <script>
 'use strict';
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
 const KEY = 'sokubai-kiroku-v1';
 
 const DEFAULT_ACTIONS = ['立ち止まった','手に取った','パラ見','しっかり読んだ','質問された','買わずに離れた','戻ってきた','いい反応'];
@@ -365,6 +365,7 @@ function viewSet(){
     <div class="btnrow" style="margin-top:8px"><button class="btn" data-newevent="1">新しいイベントを始める</button></div>
     <p class="note">新しいイベントを始めると、今の商品を値段・持ち込み数ごと写す。前のイベントの記録はそのまま残る。</p>
   </div>`;
+  s += syncCard();
   s += `<div class="card"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="wake" ${S.settings.wake?'checked':''}> 画面を消さない（電池を使う）</label>
     <p class="note">版 ${APP_VERSION}　<button class="btn" data-update="1">最新版を読み込む</button></p></div>`;
   return s;
@@ -378,7 +379,7 @@ function render(){
 
 /* ---------- 操作 ---------- */
 document.addEventListener('click', ev=>{
-  const t = ev.target.closest('[data-tab],[data-cart],[data-plus],[data-minus],[data-sale],[data-clearcart],[data-ap],[data-act],[data-happen],[data-memo],[data-cancel],[data-open],[data-tag],[data-export],[data-pup],[data-pdown],[data-pedit],[data-psave],[data-pcancel],[data-phide],[data-pdel],[data-savelists],[data-newevent],[data-update]');
+  const t = ev.target.closest('[data-tab],[data-cart],[data-plus],[data-minus],[data-sale],[data-clearcart],[data-ap],[data-act],[data-happen],[data-memo],[data-cancel],[data-open],[data-tag],[data-export],[data-pup],[data-pdown],[data-pedit],[data-psave],[data-pcancel],[data-phide],[data-pdel],[data-savelists],[data-newevent],[data-update],[data-sync],[data-unlink],[data-linkpaste]');
   if(!t) return; const d = t.dataset;
   if(d.tab){ ui.tab=d.tab; ui.open=null; render(); window.scrollTo(0,0); return; }
   if(d.plus){ ev.stopPropagation(); ui.cart[d.plus]=(ui.cart[d.plus]||0)+1; render(); return; }
@@ -403,6 +404,9 @@ document.addEventListener('click', ev=>{
   if(d.savelists){ saveLists(); return; }
   if(d.newevent){ startNewEvent(); return; }
   if(d.update){ updateApp(); return; }
+  if(d.sync){ syncNow(true); return; }
+  if(d.unlink){ if(confirm('ドライブへのつなぎ方を消す？（ドライブにある記録も、スマホの記録も消えない）')){ SY={sent:{}}; saveSync(SY); render(); toast('つなぎ方を消した'); } return; }
+  if(d.linkpaste){ const v=document.getElementById('linkPaste').value; if(connectFrom(v)){ toast('つないだ'); render(); syncNow(true); } else toast('リンクが読めなかった'); return; }
 });
 document.addEventListener('keydown', ev=>{ if(ev.target.id==='memo' && ev.key==='Enter'){ ev.preventDefault(); doMemo(); } });
 document.addEventListener('input', ev=>{ if(ev.target.id==='memo') ui.memo=ev.target.value; });
@@ -561,6 +565,95 @@ function importJSON(file){
   rd.readAsText(file);
 }
 
+/* ---------- Googleドライブに送る ----------
+   送り先（受け取り係のURL）と合言葉は、記録（S）とは別にしまう。バックアップに合言葉を混ぜないため。
+   イベントごとに「前に送ったときの中身の印」を覚えておき、変わったイベントだけ送る。 */
+const SYNC_KEY = KEY + '-sync';
+function loadSync(){ try{ return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; }catch(e){ return {}; } }
+function saveSync(o){ try{ localStorage.setItem(SYNC_KEY, JSON.stringify(o)); }catch(e){} }
+let SY = loadSync(); SY.sent = SY.sent || {};
+let syncing = false, lastAutoSync = 0;
+function sig(str){ let x=0x811c9dc5; for(let i=0;i<str.length;i++){ x^=str.charCodeAt(i); x=Math.imul(x,0x01000193)>>>0; } return x.toString(36) + '.' + str.length; }
+function eventSig(evId){
+  const ev = S.events.find(e=>e.id===evId);
+  return sig(JSON.stringify([ev, S.products.filter(p=>p.eventId===evId), S.records.filter(r=>r.eventId===evId), S.actions.map(a=>a.label)]));
+}
+function eventFiles(evId){
+  const keep = S.currentEventId; S.currentEventId = evId;
+  try{
+    const files = buildFiles().map(([nm,rows],i)=>({name:`${String(i+1).padStart(2,'0')}_${nm}.csv`, content:toCSV(rows), type:'text/csv'}));
+    files.unshift({name:'00_読み方.txt', content:'﻿'+README, type:'text/plain'});
+    const ev = curEv();
+    return {id:ev.id, name:ev.name, date:ev.date, files};
+  } finally { S.currentEventId = keep; }
+}
+function syncDirty(){
+  if(!SY.u) return false;
+  if(SY.sent.__backup !== sig(JSON.stringify(S))) return true;
+  return S.events.some(e=>SY.sent[e.id] !== eventSig(e.id));
+}
+async function syncNow(manual){
+  if(!SY.u || !SY.k){ if(manual) toast('まだつないでいない'); return; }
+  if(syncing) return;
+  if(!manual && (!navigator.onLine || !syncDirty() || Date.now()-lastAutoSync < 60000)) return;
+  if(!manual) lastAutoSync = Date.now();
+  syncing = true; if(ui.tab==='set') render();
+  const sigs = {}; const evs = [];
+  S.events.forEach(e=>{ const s = eventSig(e.id); sigs[e.id] = s;
+    if(SY.sent[e.id] !== s || (manual && e.id===S.currentEventId)) evs.push(eventFiles(e.id)); });
+  const backup = JSON.stringify(S, null, 1); sigs.__backup = sig(JSON.stringify(S));
+  let res = null, msg = '';
+  try{
+    const r = await fetch(SY.u, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify({key:SY.k, app:APP_VERSION, events:evs, backup})});
+    res = await r.json();
+    if(!res.ok) msg = res.msg || '受け取り係がことわった';
+  }catch(e){ msg = navigator.onLine ? '送れなかった（受け取り係に届かない）' : 'ネットにつながっていない'; }
+  syncing = false;
+  if(res && res.ok){
+    Object.assign(SY.sent, sigs); SY.at = Date.now(); SY.err = ''; saveSync(SY);
+    toast(evs.length ? `ドライブに送った（${evs.length}件のイベント）` : 'ドライブに送った');
+  } else {
+    SY.err = msg; saveSync(SY);
+    if(manual) toast(msg);
+  }
+  if(ui.tab==='set') render();
+}
+function connectFrom(text){
+  const m = String(text||'').match(/#connect=([A-Za-z0-9_-]+)/) || String(text||'').match(/^([A-Za-z0-9_-]{20,})$/);
+  if(!m) return false;
+  try{
+    let b = m[1].replace(/-/g,'+').replace(/_/g,'/'); while(b.length%4) b+='=';
+    const o = JSON.parse(atob(b));
+    if(!/^https:\/\/script\.google\.com\/.+\/exec$/.test(o.u) || !o.k) return false;
+    SY = {u:o.u, k:o.k, sent:{}, at:0, err:''}; saveSync(SY); return true;
+  }catch(e){ return false; }
+}
+function syncCard(){
+  let s = `<div class="card"><b>Googleドライブに送る</b>`;
+  if(!SY.u){
+    s += `<p class="note">まだつないでいない。パソコンで出した「つなぐリンク」を、このスマホのChromeで開くとつながる。開けないときは、リンクをここに貼って「つなぐ」。</p>
+      <input class="f" id="linkPaste" placeholder="つなぐリンクを貼る">
+      <div class="btnrow" style="margin-top:8px"><button class="btn" data-linkpaste="1">つなぐ</button></div>`;
+  } else {
+    const st = syncing ? '送っているところ…'
+      : SY.err ? `前回は送れなかった：${h(SY.err)}`
+      : SY.at ? `最後に送った：${h(fmtParts(SY.at).full.slice(5,16))}` : 'まだ一度も送っていない';
+    s += `<p class="note">つながっている。ネットにつながっているときにアプリを開くと、変わった分を自動で送る。<br>${st}${syncDirty()&&!syncing?'<br><b>まだ送っていない記録がある</b>':''}</p>
+      <div class="btnrow" style="margin-top:8px"><button class="btn main" data-sync="1" ${syncing?'disabled':''}>ドライブに送る</button><button class="btn" data-unlink="1">つなぎ方を消す</button></div>
+      <p class="note">送り先：Googleドライブの「🦀AI連携／05_🧾即売会きろく」フォルダ。イベントごとにフォルダが分かれる。何回送ってもファイルは増えない（上書き）。</p>`;
+  }
+  return s + '</div>';
+}
+function checkConnectLink(){
+  if(!/^#connect=/.test(location.hash)) return;
+  const link = location.hash;
+  try{ history.replaceState(null, '', location.pathname + location.search); }catch(e){}
+  if(!confirm('このスマホを、Googleドライブの送り先につなぐ？')) return;
+  if(connectFrom(link)){ toast('つないだ'); render(); syncNow(true); }
+  else alert('このリンクは読めなかった。パソコンでリンクを出し直して。');
+}
+window.addEventListener('online', ()=>setTimeout(()=>syncNow(false), 3000));
+
 /* ---------- 画面を消さない・オフライン ---------- */
 let wakeLock = null;
 async function wake(){
@@ -569,7 +662,7 @@ async function wake(){
     else if(!S.settings.wake && wakeLock){ await wakeLock.release(); wakeLock=null; }
   }catch(e){}
 }
-document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') wake(); });
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible'){ wake(); setTimeout(()=>syncNow(false), 2000); } });
 async function updateApp(){
   // 圏外で古い版を消すと開けなくなるので、新しい版が取れたときだけ入れ替える
   try{
@@ -583,7 +676,7 @@ async function updateApp(){
 if('serviceWorker' in navigator){ window.addEventListener('load', ()=>navigator.serviceWorker.register('sw.js').catch(()=>{})); }
 try{ navigator.storage && navigator.storage.persist && navigator.storage.persist(); }catch(e){}
 
-render(); wake();
+render(); wake(); checkConnectLink(); setTimeout(()=>syncNow(false), 2000);
 </script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 // 作成：06_開発部（Claudeくん） 2026-11-19
 // 圏外でも開けるように、画面のファイルをスマホに保存しておく係。
 // 先に保存してある版を出して、つながっていれば裏で新しい版を取っておく（次に開いたときに反映）。
-const CACHE = 'sokubai-kiroku-0.1.0';
+const CACHE = 'sokubai-kiroku-0.2.0';
 // 画面は './' で保存する（'index.html' は置き場によって転送されることがあり、転送された答えは画面として出せないため）
 const FILES = ['./', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
