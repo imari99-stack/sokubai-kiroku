@@ -85,6 +85,11 @@ textarea.f{min-height:120px}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#222;color:#fff;padding:12px 18px;border-radius:12px;font-size:16px;z-index:20;max-width:90vw;text-align:center;opacity:0;transition:opacity .15s;pointer-events:none}
 .toast.show{opacity:.95}
 .empty{text-align:center;color:var(--sub);padding:24px 8px;line-height:1.7}
+.visit{display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px dashed var(--line);border-radius:10px;padding:8px 10px;margin:0 0 8px;font-size:14px;color:var(--sub)}
+.visit small{display:block;font-size:11px}
+.visit.on{border-style:solid;border-color:var(--sel-line);background:var(--sel);color:var(--sel-ink);font-weight:600}
+.visit button,.vnote button{flex:none;border:1px solid var(--sel-line);background:#fff;color:var(--sel-ink);border-radius:8px;padding:8px 12px;font-size:15px;font-weight:600}
+.vnote{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px;color:var(--sel-ink);margin:0 2px 8px}
 </style>
 </head>
 <body>
@@ -92,7 +97,7 @@ textarea.f{min-height:120px}
 <div id="toast" class="toast"></div>
 <script>
 'use strict';
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.3.0';
 const KEY = 'sokubai-kiroku-v1';
 
 const DEFAULT_ACTIONS = ['立ち止まった','手に取った','パラ見','しっかり読んだ','質問された','買わずに離れた','戻ってきた','いい反応'];
@@ -110,7 +115,7 @@ function initState(){
   return {version:1, events:[ev], currentEventId:ev.id, products:[], records:[],
     actions: DEFAULT_ACTIONS.map(l=>({id:uid(), label:l})),
     saidTags: DEFAULT_SAID.slice(), guessTags: DEFAULT_GUESS.slice(),
-    settings:{wake:true}};
+    settings:{wake:true}, visit:null};
 }
 function load(){
   try{
@@ -124,6 +129,7 @@ function fix(s){
   s.actions = s.actions && s.actions.length ? s.actions : DEFAULT_ACTIONS.map(l=>({id:uid(), label:l}));
   s.saidTags = s.saidTags||DEFAULT_SAID.slice(); s.guessTags = s.guessTags||DEFAULT_GUESS.slice();
   s.settings = s.settings||{wake:true};
+  if(s.visit===undefined) s.visit = null; // 0.3.0：いまのお客さん
   if(!s.events.find(e=>e.id===s.currentEventId)) s.currentEventId = s.events[0].id;
   return s;
 }
@@ -182,20 +188,49 @@ function feedback(msg){ toast(msg); try{ navigator.vibrate && navigator.vibrate(
 let toastTimer;
 function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('show'),1400); }
 
+/* ---------- お客さんごとの流れ（0.3.0） ----------
+   行動を押すと「いまのお客さん」に足していく。前に押してから3分あいたら、別のお客さんとして始める。
+   「売れた／渡した」か「買わずに離れた」を押したら、そのお客さんは終わり。「次の人」で手で区切ることもできる。
+   同じ人を追いかけているわけではないので、書き出しでは「たぶん同じ人」として扱う。 */
+const VISIT_GAP = 3*60*1000;
+const LEAVE_LABEL = '買わずに離れた';
+function curVisit(){
+  const v = S.visit;
+  if(!v || v.eventId!==S.currentEventId || Date.now()-v.lastTs > VISIT_GAP) return null;
+  return v;
+}
+function visitSteps(id){ return liveRecords().filter(r=>r.visit===id).sort((a,b)=>a.ts-b.ts); }
+function stepLabel(r){
+  if(r.kind==='sale'){ const paid=r.items.filter(it=>it.price>0); const names=r.items.map(it=>it.name+(it.qty>1?'×'+it.qty:'')).join('・'); return (paid.length?'買った':'無配を渡した')+'（'+names+'）'; }
+  const p = r.productId ? prodById(r.productId) : null;
+  return r.label + (r.productId ? '（'+((p&&p.name)||r.productName)+'）' : '');
+}
+function visitBar(){
+  const v = curVisit(); const steps = v ? visitSteps(v.id) : [];
+  if(!steps.length) return `<div class="visit"><span>いまのお客さん：なし<small>行動を押すと始まる。3分あくと自動で区切る</small></span></div>`;
+  return `<div class="visit on"><span>いまのお客さん：${h(steps.map(r=>r.label).join(' → '))}</span><button data-nextvisit="1">次の人</button></div>`;
+}
+function endVisit(){ S.visit = null; }
+
 function doSale(){
   const now = Date.now(); if(now-ui.lastTap<700) return; ui.lastTap=now;
   const ids = Object.keys(ui.cart).filter(id=>ui.cart[id]>0);
   if(!ids.length){ toast('先に商品を押して'); return; }
   const items = ids.map(id=>{ const p=prodById(id); return {productId:id, name:p.name, category:p.category, qty:ui.cart[id], price:p.price}; });
   const total = items.reduce((s,it)=>s+it.price*it.qty,0);
-  addRecord({kind:'sale', items, total});
+  const v = curVisit(); const hadSteps = v && visitSteps(v.id).length;
+  const rec = {kind:'sale', items, total}; if(hadSteps) rec.visit = v.id;
+  endVisit(); addRecord(rec);
   ui.cart = {};
   feedback(total>0 ? `記録した ${yen(total)}` : '無配を渡した');
   render();
 }
 function doAction(aid){
   const a = S.actions.find(x=>x.id===aid); const p = ui.actProduct ? prodById(ui.actProduct) : null;
-  addRecord({kind:'action', actionId:aid, label:a.label, productId:p?p.id:null, productName:p?p.name:null, said:[], guess:[]});
+  let v = curVisit(); if(!v){ v = {id:uid(), eventId:S.currentEventId, lastTs:0}; S.visit = v; }
+  v.lastTs = Date.now();
+  if(a.label===LEAVE_LABEL) endVisit();
+  addRecord({kind:'action', actionId:aid, label:a.label, productId:p?p.id:null, productName:p?p.name:null, said:[], guess:[], visit:v.id});
   feedback(`${a.label}・${pname(p)}`);
   ui.actProduct = null; render();
 }
@@ -205,10 +240,14 @@ function doMemo(){
   if(!text){ toast('メモが空っぽ'); return; }
   const p = ui.actProduct ? prodById(ui.actProduct) : null;
   addRecord({kind:'memo', text, productId:p?p.id:null, productName:p?p.name:null});
+  // 0.3.0：入力欄も空にする（render() が入力欄の文字を ui.memo に読み戻すので、先に消しておかないと残る）
+  if(el) el.value='';
   ui.memo=''; ui.actProduct=null; feedback('メモを残した'); render();
 }
 function toggleCancel(id){
   const r = S.records.find(x=>x.id===id); if(!r) return;
+  // 0.3.0：取り消すときだけ確認する（レイフレで「✕」に手が当たって3回取り消された）。元に戻すときは聞かない
+  if(!r.cancelled && !confirm(`この記録を取り消す？\n\n${hm(r.ts)}　${recLabel(r)}`)) return;
   r.cancelled = !r.cancelled; if(r.cancelled) r.cancelledAt=Date.now();
   save(); toast(r.cancelled ? '取り消した（記録の画面で元に戻せる）' : '元に戻した'); render();
 }
@@ -271,6 +310,8 @@ function viewSale(){
   const freeN = ids.filter(id=>prodById(id).price<=0).reduce((t,id)=>t+ui.cart[id],0);
   s += `<div class="total"><span>合計${freeN?`（無配 ${freeN}）`:''}</span><span class="yen">${yen(total)}</span></div>`;
   const label = !ids.length ? '商品を押して' : (total>0 ? `売れた ${yen(total)}` : '渡した');
+  const cv = curVisit(); const cvs = cv ? visitSteps(cv.id) : [];
+  if(cvs.length) s += `<div class="vnote"><span>いまのお客さん（${h(cvs.map(r=>r.label).join(' → '))}）の続きとして残る</span><button data-nextvisit="1">別の人</button></div>`;
   s += `<button class="big ${ids.length?'':'off'}" data-sale="1">${label}</button>`;
   if(ids.length) s += `<div style="text-align:center;margin-top:8px"><button class="btn" data-clearcart="1">選択を外す</button></div>`;
   s += recentRows(['sale'],3);
@@ -278,7 +319,7 @@ function viewSale(){
 }
 function viewAct(){
   const ps = evProducts();
-  let s = '<div class="grid4">';
+  let s = visitBar() + '<div class="grid4">';
   s += `<button class="chip ${ui.actProduct===null?'sel':''}" data-ap="">全体</button>`;
   ps.forEach(p=>{ s += `<button class="chip ${ui.actProduct===p.id?'sel':''}" data-ap="${p.id}">${h(pname(p))}</button>`; });
   s += '</div><div class="sec">行動（押したら記録。商品の選択は自動で外れる）</div><div class="grid2">';
@@ -358,7 +399,7 @@ function viewSet(){
     <div class="btnrow" style="margin-top:10px"><button class="btn main" data-savelists="1">ボタンと選択肢を保存</button></div></div>`;
   s += `<div class="card"><b>データ</b>
     <div class="btnrow" style="margin-top:8px"><button class="btn main" data-export="csv">CSVで書き出す</button><button class="btn" data-export="json">バックアップを保存</button></div>
-    <p class="note">CSV：このイベントの記録を9つのファイルにして送る（LINE・メール・Googleドライブなど）。<br>バックアップ：全部のイベントを1つのファイルに。スマホを替えたときや消えたときに戻せる。</p>
+    <p class="note">CSV：このイベントの記録を11個のファイル（読み方＋CSV10個）にして送る（LINE・メール・Googleドライブなど）。<br>バックアップ：全部のイベントを1つのファイルに。スマホを替えたときや消えたときに戻せる。</p>
     <label class="btn" style="display:inline-block;margin-top:8px">バックアップから戻す<input type="file" id="importFile" accept=".json,application/json,text/plain" style="display:none"></label>
     <label class="f" style="margin-top:14px">使うイベント</label>
     <select class="f" id="evSwitch">${S.events.slice().sort((a,b)=>b.createdAt-a.createdAt).map(x=>`<option value="${x.id}" ${x.id===S.currentEventId?'selected':''}>${h(x.date)} ${h(x.name)}</option>`).join('')}</select>
@@ -379,7 +420,7 @@ function render(){
 
 /* ---------- 操作 ---------- */
 document.addEventListener('click', ev=>{
-  const t = ev.target.closest('[data-tab],[data-cart],[data-plus],[data-minus],[data-sale],[data-clearcart],[data-ap],[data-act],[data-happen],[data-memo],[data-cancel],[data-open],[data-tag],[data-export],[data-pup],[data-pdown],[data-pedit],[data-psave],[data-pcancel],[data-phide],[data-pdel],[data-savelists],[data-newevent],[data-update],[data-sync],[data-unlink],[data-linkpaste]');
+  const t = ev.target.closest('[data-tab],[data-cart],[data-plus],[data-minus],[data-sale],[data-clearcart],[data-ap],[data-act],[data-happen],[data-memo],[data-cancel],[data-open],[data-tag],[data-export],[data-pup],[data-pdown],[data-pedit],[data-psave],[data-pcancel],[data-phide],[data-pdel],[data-savelists],[data-newevent],[data-update],[data-sync],[data-unlink],[data-linkpaste],[data-nextvisit]');
   if(!t) return; const d = t.dataset;
   if(d.tab){ ui.tab=d.tab; ui.open=null; render(); window.scrollTo(0,0); return; }
   if(d.plus){ ev.stopPropagation(); ui.cart[d.plus]=(ui.cart[d.plus]||0)+1; render(); return; }
@@ -404,6 +445,7 @@ document.addEventListener('click', ev=>{
   if(d.savelists){ saveLists(); return; }
   if(d.newevent){ startNewEvent(); return; }
   if(d.update){ updateApp(); return; }
+  if(d.nextvisit){ endVisit(); save(); feedback('次のお客さんにした'); render(); return; }
   if(d.sync){ syncNow(true); return; }
   if(d.unlink){ if(confirm('ドライブへのつなぎ方を消す？（ドライブにある記録も、スマホの記録も消えない）')){ SY={sent:{}}; saveSync(SY); render(); toast('つなぎ方を消した'); } return; }
   if(d.linkpaste){ const v=document.getElementById('linkPaste').value; if(connectFrom(v)){ toast('つないだ'); render(); syncNow(true); } else toast('リンクが読めなかった'); return; }
@@ -489,10 +531,13 @@ function buildFiles(){
   const items = [['会計ID','日時','時台','商品ID','商品名','区分','数量','そのときの単価','小計','無配']];
   sales.forEach(r=>r.items.forEach(it=>items.push([r.id,F(r.ts),H(r.ts),it.productId,it.name,it.category,it.qty,it.price,it.price*it.qty,it.price>0?'':'無配'])));
   files.push(['販売明細', items]);
-  const acts = [['記録ID','日時','時台','行動','商品ID','商品名','来場者が言ったこと','推測（事実ではない）','出どころ']];
+  // お客さん番号：記録の古い順に 1,2,3…（0.3.0より前の記録には無い）
+  const vno = {}; let vn = 0;
+  live.forEach(r=>{ if(r.visit && !vno[r.visit]) vno[r.visit] = ++vn; });
+  const acts = [['記録ID','日時','時台','行動','商品ID','商品名','来場者が言ったこと','推測（事実ではない）','出どころ','お客さん番号（たぶん同じ人）']];
   live.forEach(r=>{
-    if(r.kind==='action') acts.push([r.id,F(r.ts),H(r.ts),r.label,r.productId||'',r.productId?(prodById(r.productId)||{}).name||r.productName:'全体',(r.said||[]).join(' / '),(r.guess||[]).join(' / '),'ボタン']);
-    if(r.kind==='sale') r.items.filter(it=>it.price>0).forEach(it=>acts.push([r.id,F(r.ts),H(r.ts),'買った',it.productId,it.name,'','','販売から自動']));
+    if(r.kind==='action') acts.push([r.id,F(r.ts),H(r.ts),r.label,r.productId||'',r.productId?(prodById(r.productId)||{}).name||r.productName:'全体',(r.said||[]).join(' / '),(r.guess||[]).join(' / '),'ボタン',vno[r.visit]||'']);
+    if(r.kind==='sale') r.items.filter(it=>it.price>0).forEach(it=>acts.push([r.id,F(r.ts),H(r.ts),'買った',it.productId,it.name,'','','販売から自動',vno[r.visit]||'']));
   });
   files.push(['行動', acts]);
   const tags = [['記録ID','日時','時台','行動','商品名','種類','タグ']];
@@ -519,6 +564,16 @@ function buildFiles(){
     sum.push([hh+'時',rev,pq,cnt,fq,inH.filter(r=>r.kind==='action').length,inH.filter(r=>r.kind==='memo').length,aw]);
   });
   files.push(['時間帯まとめ', sum]);
+  // 10：お客さんごとの流れ（0.3.0〜。ファイルの番号を前のものとずらさないよう、いちばん後ろに置く）
+  const flow = [['お客さん番号（たぶん同じ人）','始まり','終わり','時台','流れ','結果','行動の数']];
+  Object.keys(vno).sort((a,b)=>vno[a]-vno[b]).forEach(id=>{
+    const st = live.filter(r=>r.visit===id).sort((a,b)=>a.ts-b.ts);
+    const sale = st.find(r=>r.kind==='sale'); const last = st[st.length-1];
+    const res = sale ? (sale.items.some(it=>it.price>0) ? '買った' : '無配を渡した')
+      : (last.kind==='action' && last.label===LEAVE_LABEL ? '買わずに離れた' : 'わからない（途中で区切れた）');
+    flow.push([vno[id], F(st[0].ts), F(last.ts), H(st[0].ts), st.map(stepLabel).join(' → '), res, st.filter(r=>r.kind==='action').length]);
+  });
+  files.push(['お客さんの流れ', flow]);
   return files;
 }
 const README = `即売会きろく の書き出しデータ（読み方）
@@ -532,6 +587,9 @@ const README = `即売会きろく の書き出しデータ（読み方）
 ・無配は売上に入れていない。「無配を渡した数」として別に数えている。
 ・取り消した記録は入っていない。
 ・出来事（ポスターを変えた等）の前後で数字が違っても、それが原因だとは言い切れない。
+・「お客さん番号」と「お客さんの流れ」（版0.3.0から）は、押した時刻でつないだ"たぶん同じ人"。
+　前に押してから3分以内の行動を同じお客さんとしてまとめ、「売れた／渡した」「買わずに離れた」「次の人」で区切っている。
+　2人が同時に見ていると混ざる。正確な人数ではない。行動を押さずにそのまま買った人は、流れに入っていない。
 `;
 async function shareOrDownload(fileObjs, title){
   try{
